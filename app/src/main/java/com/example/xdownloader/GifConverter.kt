@@ -3,6 +3,8 @@ package com.example.xdownloader
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import java.io.BufferedOutputStream
+import java.io.File
+import java.io.FileInputStream
 import java.io.OutputStream
 import java.util.Arrays
 
@@ -21,26 +23,45 @@ object GifConverter {
 
     fun convert(path: String, out: OutputStream, onProgress: (Int) -> Unit) {
         val mmr = MediaMetadataRetriever()
+        var fis: FileInputStream? = null
         try {
-            mmr.setDataSource(path)
-            val durMs = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                ?.toLongOrNull() ?: 0L
-            var vw = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                ?.toIntOrNull() ?: 0
-            var vh = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                ?.toIntOrNull() ?: 0
-            val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                ?.toIntOrNull() ?: 0
+            try {
+                mmr.setDataSource(path)
+            } catch (e: Exception) {
+                // Alternativa: abrir el archivo mediante su descriptor
+                fis = FileInputStream(path)
+                mmr.setDataSource(fis.fd)
+            }
+
+            val fileSize = File(path).length()
+            val durMs = meta(mmr, MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            var vw = meta(mmr, MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            var vh = meta(mmr, MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            val rot = meta(mmr, MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
             if (rot == 90 || rot == 270) {
                 val t = vw; vw = vh; vh = t
             }
-            if (vw <= 0 || vh <= 0) throw Exception("No se pudo leer el vídeo.")
+            if (vw <= 0 || vh <= 0) {
+                // Sin metadatos de tamaño: se deduce del primer fotograma
+                val first = firstFrame(mmr)
+                if (first != null) {
+                    vw = first.width
+                    vh = first.height
+                    first.recycle()
+                }
+            }
+            if (vw <= 0 || vh <= 0) {
+                val mime = meta(mmr, MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+                throw Exception("No se pudo leer el vídeo (archivo de $fileSize bytes, tipo: $mime).")
+            }
 
             val scale = minOf(1.0, MAX_WIDTH.toDouble() / vw)
             val w = maxOf(1, (vw * scale).toInt())
             val h = maxOf(1, (vh * scale).toInt())
 
-            val usedUs = maxOf(minOf(durMs, MAX_SECONDS * 1000L) * 1000L, STEP_US)
+            // Si el archivo no indica su duración se asumen 6 s
+            val totalMs = if (durMs > 0) durMs else 6000L
+            val usedUs = maxOf(minOf(totalMs, MAX_SECONDS * 1000L) * 1000L, STEP_US)
             val frames = maxOf(1, (usedUs / STEP_US).toInt())
 
             // ---- Paso 1: paleta global a partir de unos cuantos fotogramas ----
@@ -60,7 +81,7 @@ object GifConverter {
                     p += stride
                 }
             }
-            if (n == 0) throw Exception("No se pudieron leer fotogramas del vídeo.")
+            if (n == 0) throw Exception("No se pudieron leer fotogramas del vídeo (archivo de $fileSize bytes).")
             val palette = medianCut(samples, n)
             val quant = Quantizer(palette)
 
@@ -84,13 +105,33 @@ object GifConverter {
             if (!haveFrame) throw Exception("No se pudieron leer fotogramas del vídeo.")
             enc.finish()
         } finally {
-            mmr.release()
+            try { mmr.release() } catch (e: Exception) { }
+            try { fis?.close() } catch (e: Exception) { }
         }
     }
 
+    private fun meta(mmr: MediaMetadataRetriever, key: Int): String? =
+        try { mmr.extractMetadata(key) } catch (e: Exception) { null }
+
+    private fun firstFrame(mmr: MediaMetadataRetriever): Bitmap? {
+        var b: Bitmap? = try {
+            mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } catch (e: Exception) { null }
+        if (b == null) b = try { mmr.getFrameAtTime() } catch (e: Exception) { null }
+        return b
+    }
+
     private fun grab(mmr: MediaMetadataRetriever, tUs: Long, w: Int, h: Int): Bitmap? {
-        val b = mmr.getScaledFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST, w, h)
-            ?: return null
+        var b: Bitmap? = try {
+            mmr.getScaledFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST, w, h)
+        } catch (e: Exception) { null }
+        if (b == null) b = try {
+            mmr.getFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST)
+        } catch (e: Exception) { null }
+        if (b == null) b = try {
+            mmr.getFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } catch (e: Exception) { null }
+        if (b == null) return null
         if (b.width == w && b.height == h) return b
         val scaled = Bitmap.createScaledBitmap(b, w, h, true)
         if (scaled !== b) b.recycle()
