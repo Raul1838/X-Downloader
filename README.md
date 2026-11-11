@@ -1,14 +1,19 @@
 # Descargador X
 
-App Android sencilla: pega el enlace de un tweet (X) y descarga sus imágenes, vídeos o GIFs a la galería.
-También aparece en "Compartir" desde la app de X (rellena el enlace; eliges formato y pulsas Descargar).
+App Android sencilla con dos funciones. Requiere Android 10 o superior.
 
-## Formato de vídeos y GIFs
-- **MP4**: el archivo original -> Películas/XDescargas
-- **GIF**: primero se guarda el MP4 en la galería (Películas/XDescargas) y después se convierte a GIF animado en el propio móvil (máx. 20 s, ancho máx. 480 px, ~14 fps) -> Imágenes/XDescargas. Quedan guardados los dos.
-- Las imágenes se guardan siempre como imagen -> Imágenes/XDescargas
+## 1. Descargar de X
+Pega el enlace de un tweet (X) y pulsa **Descargar MP4**: guarda sus imágenes, vídeos o GIFs en la galería.
+También aparece en "Compartir" desde la app de X (descarga directamente).
 
-Requiere Android 10 o superior.
+- Imágenes -> Imágenes/XDescargas
+- Vídeos y GIFs (X los sirve como MP4) -> Películas/XDescargas
+
+## 2. Convertir a GIF
+El botón **Convertir a GIF** abre la galería: eliges un vídeo o una imagen, se convierte en el propio móvil y el GIF se guarda en Imágenes/XDescargas.
+
+- Vídeos: máx. 20 s, ancho máx. 480 px, ~14 fps.
+- Imágenes: se guardan como GIF de un solo fotograma (lado máx. 800 px).
 
 ## APK
 Al subir el proyecto a GitHub (rama `main`), GitHub Actions compila el APK automáticamente.

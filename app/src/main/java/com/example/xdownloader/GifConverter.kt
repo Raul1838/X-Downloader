@@ -2,6 +2,7 @@ package com.example.xdownloader
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.ParcelFileDescriptor
@@ -25,6 +26,7 @@ object GifConverter {
     private const val DELAY_CS = 7             // 7 centésimas de segundo por fotograma
     private const val PALETTE_FRAMES = 12      // fotogramas usados para calcular la paleta
     private const val PIXELS_PER_FRAME = 6000  // píxeles muestreados por fotograma
+    private const val IMAGE_MAX_SIDE = 800     // lado máximo al convertir una imagen
 
     /**
      * Convierte el MP4 guardado en la galería (uri) en un GIF y lo escribe en [out].
@@ -66,6 +68,40 @@ object GifConverter {
             source.close()
             tmp?.delete()
         }
+    }
+
+    /** Convierte una imagen (JPG, PNG, WebP…) en un GIF de un solo fotograma. */
+    fun convertImage(context: Context, uri: Uri, out: OutputStream) {
+        val src = ImageDecoder.createSource(context.contentResolver, uri)
+        val bmp = ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val iw = info.size.width
+            val ih = info.size.height
+            val sc = minOf(1.0, IMAGE_MAX_SIDE.toDouble() / maxOf(iw, ih))
+            decoder.setTargetSize(maxOf(1, (iw * sc).toInt()), maxOf(1, (ih * sc).toInt()))
+        }
+        val w = bmp.width
+        val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        bmp.recycle()
+
+        val stride = maxOf(1, px.size / 60000)
+        val samples = IntArray(px.size / stride + 1)
+        var n = 0
+        var p = 0
+        while (p < px.size) {
+            samples[n++] = px[p] and 0xFFFFFF
+            p += stride
+        }
+        val palette = medianCut(samples, n)
+        val quant = Quantizer(palette)
+        val idx = ByteArray(w * h)
+        for (j in px.indices) idx[j] = quant.index(px[j]).toByte()
+
+        val enc = GifEncoder(BufferedOutputStream(out, 65536), w, h, palette, DELAY_CS)
+        enc.writeFrame(idx)
+        enc.finish()
     }
 
     private fun encode(

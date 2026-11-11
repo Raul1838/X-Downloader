@@ -5,10 +5,12 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -17,8 +19,6 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONObject
@@ -30,9 +30,8 @@ class MainActivity : Activity() {
     private data class Media(val url: String, val kind: String) // kind: photo | video | gif
 
     private lateinit var input: EditText
-    private lateinit var rbMp4: RadioButton
-    private lateinit var rbGif: RadioButton
     private lateinit var downloadBtn: Button
+    private lateinit var convertBtn: Button
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
 
@@ -47,12 +46,12 @@ class MainActivity : Activity() {
         handleIntent(intent)
     }
 
-    // Si llega desde "Compartir" en la app de X, rellena el enlace para elegir formato y descargar
+    // Si llega desde "Compartir" en la app de X, descarga directamente
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND) {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
             input.setText(text)
-            status.text = "Enlace recibido. Elige el formato y pulsa Descargar."
+            startDownload()
         }
     }
 
@@ -64,6 +63,7 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(20), dp(20), dp(20))
         }
 
+        // ----- Descarga desde X -----
         val title = TextView(this).apply {
             text = "Descarga imágenes, vídeos y GIFs de X (Twitter)"
             textSize = 18f
@@ -78,45 +78,49 @@ class MainActivity : Activity() {
             topMargin = dp(16)
         })
 
-        val formatLabel = TextView(this).apply {
-            text = "Formato para vídeos y GIFs:"
-            textSize = 14f
-        }
-        root.addView(formatLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = dp(8)
-        })
-
-        rbMp4 = RadioButton(this).apply {
-            text = "MP4"
-            id = View.generateViewId()
-        }
-        rbGif = RadioButton(this).apply {
-            text = "GIF (máx. 20 s)"
-            id = View.generateViewId()
-        }
-        val group = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            addView(rbMp4)
-            addView(rbGif, RadioGroup.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                leftMargin = dp(24)
-            })
-        }
-        root.addView(group, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        rbMp4.isChecked = true
-
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val pasteBtn = Button(this).apply {
             text = "Pegar"
             setOnClickListener { pasteFromClipboard() }
         }
         downloadBtn = Button(this).apply {
-            text = "Descargar"
+            text = "Descargar MP4"
             setOnClickListener { startDownload() }
         }
         row.addView(pasteBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         row.addView(downloadBtn, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         root.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
+        // ----- Conversión a GIF -----
+        val divider = View(this).apply { setBackgroundColor(0x33000000) }
+        root.addView(divider, LinearLayout.LayoutParams(MATCH_PARENT, dp(1)).apply {
+            topMargin = dp(24)
+        })
+
+        val convertTitle = TextView(this).apply {
+            text = "Convertir a GIF"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+        }
+        root.addView(convertTitle, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(16)
+        })
+
+        val convertInfo = TextView(this).apply {
+            text = "Elige un vídeo o una imagen de la galería: se convierte y se guarda como GIF."
+            textSize = 14f
+        }
+        root.addView(convertInfo, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(4)
+        })
+
+        convertBtn = Button(this).apply {
+            text = "Convertir a GIF: elegir de la galería"
+            setOnClickListener { pickMedia() }
+        }
+        root.addView(convertBtn, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        // ----- Estado -----
         progress = ProgressBar(this).apply {
             isIndeterminate = true
             visibility = View.GONE
@@ -125,7 +129,10 @@ class MainActivity : Activity() {
             topMargin = dp(16)
         })
 
-        status = TextView(this).apply { textSize = 16f }
+        status = TextView(this).apply {
+            textSize = 16f
+            setTextIsSelectable(true) // para poder copiar los mensajes de error
+        }
         root.addView(status, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = dp(16)
         })
@@ -146,9 +153,12 @@ class MainActivity : Activity() {
 
     private fun setBusy(busy: Boolean, message: String) {
         downloadBtn.isEnabled = !busy
+        convertBtn.isEnabled = !busy
         progress.visibility = if (busy) View.VISIBLE else View.GONE
         status.text = message
     }
+
+    // ---------- Descarga desde X (MP4 / imágenes) ----------
 
     private fun startDownload() {
         val text = input.text.toString()
@@ -157,37 +167,23 @@ class MainActivity : Activity() {
             status.text = "El enlace no es válido. Debe parecerse a x.com/usuario/status/123456…"
             return
         }
-        val asGif = rbGif.isChecked
         setBusy(true, "Buscando contenido…")
         Thread {
             try {
                 val items = fetchMedia(id)
                 if (items.isEmpty()) throw Exception("Este tweet no tiene imágenes, vídeos ni GIFs.")
-                val converted = asGif && items.any { it.kind != "photo" }
                 items.forEachIndexed { i, m ->
-                    val label = "${i + 1} de ${items.size}"
-                    if (asGif && m.kind != "photo") {
-                        runOnUiThread { status.text = "Descargando $label…" }
-                        saveAsGif(m, id, i + 1) { pct ->
-                            runOnUiThread { status.text = "Convirtiendo a GIF $label… $pct%" }
-                        }
-                    } else {
-                        runOnUiThread { status.text = "Descargando $label…" }
-                        save(m, id, i + 1)
-                    }
+                    runOnUiThread { status.text = "Descargando ${i + 1} de ${items.size}…" }
+                    save(m, id, i + 1)
                 }
-                val extra = if (converted) " El MP4 original también queda guardado en Películas/XDescargas." else ""
                 runOnUiThread {
-                    setBusy(false, "✅ ${items.size} archivo(s) guardado(s) en la galería (carpeta XDescargas).$extra")
+                    setBusy(false, "✅ ${items.size} archivo(s) guardado(s) en la galería (carpeta XDescargas).")
                 }
-            } catch (e: Throwable) {
-                val msg = if (e is OutOfMemoryError) "Sin memoria suficiente para convertir este vídeo." else e.message
-                runOnUiThread { setBusy(false, "❌ ${msg ?: "Error desconocido"}") }
+            } catch (e: Exception) {
+                runOnUiThread { setBusy(false, "❌ ${e.message ?: "Error desconocido"}") }
             }
         }.start()
     }
-
-    // ---------- Obtención de los medios del tweet ----------
 
     private fun httpGet(url: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
@@ -245,6 +241,80 @@ class MainActivity : Activity() {
         return list
     }
 
+    // ---------- Convertir a GIF desde la galería ----------
+
+    private fun pickMedia() {
+        val i = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/*", "image/*"))
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        try {
+            startActivityForResult(i, REQ_PICK)
+        } catch (e: Exception) {
+            status.text = "No hay ninguna app para elegir archivos."
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PICK && resultCode == RESULT_OK) {
+            val uri = data?.data
+            if (uri != null) startConvert(uri)
+        }
+    }
+
+    private fun displayName(uri: Uri): String {
+        var name: String? = null
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) name = c.getString(0)
+            }
+        } catch (e: Exception) {
+            // se usa un nombre genérico
+        }
+        val base = (name ?: "archivo").substringBeforeLast('.').replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        return base.ifBlank { "archivo" }
+    }
+
+    private fun startConvert(uri: Uri) {
+        val mime = contentResolver.getType(uri) ?: ""
+        if (mime == "image/gif") {
+            status.text = "Ese archivo ya es un GIF."
+            return
+        }
+        val isImage = mime.startsWith("image/")
+        val name = displayName(uri) + ".gif"
+        setBusy(true, "Convirtiendo a GIF…")
+        Thread {
+            var gifUri: Uri? = null
+            try {
+                val target = insertPending(name, "image/gif", Environment.DIRECTORY_PICTURES, true)
+                gifUri = target
+                contentResolver.openOutputStream(target)!!.use { out ->
+                    if (isImage) {
+                        GifConverter.convertImage(this@MainActivity, uri, out)
+                    } else {
+                        GifConverter.convert(this@MainActivity, uri, out) { pct ->
+                            runOnUiThread { status.text = "Convirtiendo a GIF… $pct%" }
+                        }
+                    }
+                }
+                markDone(target)
+                runOnUiThread { setBusy(false, "✅ GIF guardado en la galería (Imágenes/XDescargas).") }
+            } catch (e: Throwable) {
+                try {
+                    gifUri?.let { contentResolver.delete(it, null, null) }
+                } catch (x: Exception) {
+                    // nada que limpiar
+                }
+                val msg = if (e is OutOfMemoryError) "Sin memoria suficiente para convertir este archivo." else e.message
+                runOnUiThread { setBusy(false, "❌ ${msg ?: "Error desconocido"}") }
+            }
+        }.start()
+    }
+
     // ---------- Guardado en la galería (MediaStore, sin permisos) ----------
 
     private fun openDownload(url: String): HttpURLConnection {
@@ -281,8 +351,8 @@ class MainActivity : Activity() {
         contentResolver.update(uri, values, null, null)
     }
 
-    // Imágenes y vídeos/GIFs tal cual (MP4). Devuelve el Uri del archivo guardado.
-    private fun save(m: Media, tweetId: String, index: Int): Uri {
+    // Imágenes y vídeos/GIFs de X tal cual (MP4)
+    private fun save(m: Media, tweetId: String, index: Int) {
         val isImage = m.kind == "photo"
         val url = if (isImage && !m.url.contains("?")) m.url + "?name=orig" else m.url
 
@@ -302,38 +372,20 @@ class MainActivity : Activity() {
         try {
             val uri = insertPending("x_${tweetId}_$index.$ext", mime, folder, isImage)
             try {
-                val copied = contentResolver.openOutputStream(uri)!!.use { out ->
+                contentResolver.openOutputStream(uri)!!.use { out ->
                     conn.inputStream.use { it.copyTo(out) }
-                }
-                val expected = conn.contentLengthLong
-                if (expected > 0 && copied != expected) {
-                    throw Exception("Descarga incompleta ($copied de $expected bytes).")
                 }
                 markDone(uri)
             } catch (e: Exception) {
                 contentResolver.delete(uri, null, null)
                 throw e
             }
-            return uri
         } finally {
             conn.disconnect()
         }
     }
 
-    // Paso 1: el MP4 se guarda en la galería. Paso 2: se convierte a GIF y se guarda también.
-    private fun saveAsGif(m: Media, tweetId: String, index: Int, onProgress: (Int) -> Unit) {
-        val videoUri = save(m, tweetId, index)
-        val gifUri = insertPending(
-            "x_${tweetId}_$index.gif", "image/gif", Environment.DIRECTORY_PICTURES, true
-        )
-        try {
-            contentResolver.openOutputStream(gifUri)!!.use { out ->
-                GifConverter.convert(this, videoUri, out, onProgress)
-            }
-            markDone(gifUri)
-        } catch (e: Throwable) {
-            contentResolver.delete(gifUri, null, null)
-            throw e
-        }
+    companion object {
+        private const val REQ_PICK = 1001
     }
 }
