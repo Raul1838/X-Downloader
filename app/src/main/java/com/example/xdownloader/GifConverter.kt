@@ -23,7 +23,18 @@ object GifConverter {
     private const val PIXELS_PER_FRAME = 6000  // píxeles muestreados por fotograma
 
     fun convert(path: String, out: OutputStream, onProgress: (Int) -> Unit) {
-        val source = openSource(path)
+        var found = openSource(path)
+        if (found == null) {
+            // Algunos móviles no reconocen marcas de MP4 modernas (p. ej. "iso5").
+            // El archivo es solo temporal, así que se cambia la marca por otra clásica y se reintenta.
+            for (brand in listOf("isom", "mp42")) {
+                if (patchBrand(path, brand)) {
+                    found = openSource(path)
+                    if (found != null) break
+                }
+            }
+        }
+        val source = found
             ?: throw Exception("No se pudo leer el vídeo. Datos: ${describeFile(path)}")
         val mmr = source.mmr
         try {
@@ -100,6 +111,36 @@ object GifConverter {
         } finally {
             source.close()
         }
+    }
+
+    // Sustituye la marca principal y las compatibles de la caja "ftyp" por la indicada
+    private fun patchBrand(path: String, brand: String): Boolean {
+        var ok = false
+        try {
+            RandomAccessFile(File(path), "rw").use { raf ->
+                if (raf.length() >= 16) {
+                    raf.seek(0)
+                    val size = raf.readInt().toLong() and 0xFFFFFFFFL
+                    val type = ByteArray(4)
+                    raf.readFully(type)
+                    if (String(type, Charsets.ISO_8859_1) == "ftyp" && size >= 16 && size <= raf.length()) {
+                        val bytes = brand.toByteArray(Charsets.ISO_8859_1)
+                        raf.seek(8)
+                        raf.write(bytes)
+                        var off = 16L
+                        while (off + 4 <= size) {
+                            raf.seek(off)
+                            raf.write(bytes)
+                            off += 4
+                        }
+                        ok = true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            ok = false
+        }
+        return ok
     }
 
     private class Source(val mmr: MediaMetadataRetriever, val stream: FileInputStream?) {
