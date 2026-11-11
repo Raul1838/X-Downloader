@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
@@ -16,9 +17,12 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -27,6 +31,8 @@ class MainActivity : Activity() {
     private data class Media(val url: String, val kind: String) // kind: photo | video | gif
 
     private lateinit var input: EditText
+    private lateinit var rbMp4: RadioButton
+    private lateinit var rbGif: RadioButton
     private lateinit var downloadBtn: Button
     private lateinit var progress: ProgressBar
     private lateinit var status: TextView
@@ -42,12 +48,12 @@ class MainActivity : Activity() {
         handleIntent(intent)
     }
 
-    // Si llega desde "Compartir" en la app de X, descarga directamente
+    // Si llega desde "Compartir" en la app de X, rellena el enlace para elegir formato y descargar
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND) {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
             input.setText(text)
-            startDownload()
+            status.text = "Enlace recibido. Elige el formato y pulsa Descargar."
         }
     }
 
@@ -72,6 +78,32 @@ class MainActivity : Activity() {
         root.addView(input, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = dp(16)
         })
+
+        val formatLabel = TextView(this).apply {
+            text = "Formato para vídeos y GIFs:"
+            textSize = 14f
+        }
+        root.addView(formatLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = dp(8)
+        })
+
+        rbMp4 = RadioButton(this).apply {
+            text = "MP4"
+            id = View.generateViewId()
+        }
+        rbGif = RadioButton(this).apply {
+            text = "GIF (máx. 20 s)"
+            id = View.generateViewId()
+        }
+        val group = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            addView(rbMp4)
+            addView(rbGif, RadioGroup.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                leftMargin = dp(24)
+            })
+        }
+        root.addView(group, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        rbMp4.isChecked = true
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val pasteBtn = Button(this).apply {
@@ -126,20 +158,30 @@ class MainActivity : Activity() {
             status.text = "El enlace no es válido. Debe parecerse a x.com/usuario/status/123456…"
             return
         }
+        val asGif = rbGif.isChecked
         setBusy(true, "Buscando contenido…")
         Thread {
             try {
                 val items = fetchMedia(id)
                 if (items.isEmpty()) throw Exception("Este tweet no tiene imágenes, vídeos ni GIFs.")
                 items.forEachIndexed { i, m ->
-                    runOnUiThread { status.text = "Descargando ${i + 1} de ${items.size}…" }
-                    save(m, id, i + 1)
+                    val label = "${i + 1} de ${items.size}"
+                    if (asGif && m.kind != "photo") {
+                        runOnUiThread { status.text = "Descargando $label…" }
+                        saveAsGif(m, id, i + 1) { pct ->
+                            runOnUiThread { status.text = "Convirtiendo a GIF $label… $pct%" }
+                        }
+                    } else {
+                        runOnUiThread { status.text = "Descargando $label…" }
+                        save(m, id, i + 1)
+                    }
                 }
                 runOnUiThread {
                     setBusy(false, "✅ ${items.size} archivo(s) guardado(s) en la galería (carpeta XDescargas).")
                 }
-            } catch (e: Exception) {
-                runOnUiThread { setBusy(false, "❌ ${e.message ?: "Error desconocido"}") }
+            } catch (e: Throwable) {
+                val msg = if (e is OutOfMemoryError) "Sin memoria suficiente para convertir este vídeo." else e.message
+                runOnUiThread { setBusy(false, "❌ ${msg ?: "Error desconocido"}") }
             }
         }.start()
     }
@@ -204,6 +246,41 @@ class MainActivity : Activity() {
 
     // ---------- Guardado en la galería (MediaStore, sin permisos) ----------
 
+    private fun openDownload(url: String): HttpURLConnection {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 15000
+        conn.readTimeout = 30000
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android) DescargadorX/1.0")
+        if (conn.responseCode !in 200..299) {
+            val code = conn.responseCode
+            conn.disconnect()
+            throw Exception("Error al descargar (HTTP $code).")
+        }
+        return conn
+    }
+
+    private fun insertPending(name: String, mime: String, folder: String, images: Boolean): Uri {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "$folder/XDescargas")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val collection = if (images) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        } else {
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        }
+        return contentResolver.insert(collection, values)
+            ?: throw Exception("No se pudo crear el archivo en el dispositivo.")
+    }
+
+    private fun markDone(uri: Uri) {
+        val values = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+        contentResolver.update(uri, values, null, null)
+    }
+
+    // Imágenes y vídeos/GIFs tal cual (MP4)
     private fun save(m: Media, tweetId: String, index: Int) {
         val isImage = m.kind == "photo"
         val url = if (isImage && !m.url.contains("?")) m.url + "?name=orig" else m.url
@@ -218,42 +295,49 @@ class MainActivity : Activity() {
             "gif" -> "image/gif"
             else -> "image/jpeg"
         }
-        val name = "x_${tweetId}_$index.$ext"
+        val folder = if (isImage) Environment.DIRECTORY_PICTURES else Environment.DIRECTORY_MOVIES
 
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, mime)
-            put(
-                MediaStore.MediaColumns.RELATIVE_PATH,
-                (if (isImage) Environment.DIRECTORY_PICTURES else Environment.DIRECTORY_MOVIES) + "/XDescargas"
-            )
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val collection = if (isImage) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }
-        val uri = contentResolver.insert(collection, values)
-            ?: throw Exception("No se pudo crear el archivo en el dispositivo.")
-
-        val conn = URL(url).openConnection() as HttpURLConnection
+        val conn = openDownload(url)
         try {
-            conn.connectTimeout = 15000
-            conn.readTimeout = 30000
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android) DescargadorX/1.0")
-            if (conn.responseCode !in 200..299) throw Exception("Error al descargar (HTTP ${conn.responseCode}).")
-            contentResolver.openOutputStream(uri)!!.use { out ->
-                conn.inputStream.use { it.copyTo(out) }
+            val uri = insertPending("x_${tweetId}_$index.$ext", mime, folder, isImage)
+            try {
+                contentResolver.openOutputStream(uri)!!.use { out ->
+                    conn.inputStream.use { it.copyTo(out) }
+                }
+                markDone(uri)
+            } catch (e: Exception) {
+                contentResolver.delete(uri, null, null)
+                throw e
             }
-            values.clear()
-            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-            contentResolver.update(uri, values, null, null)
-        } catch (e: Exception) {
-            contentResolver.delete(uri, null, null)
-            throw e
         } finally {
             conn.disconnect()
+        }
+    }
+
+    // Vídeos y GIFs convertidos a GIF animado
+    private fun saveAsGif(m: Media, tweetId: String, index: Int, onProgress: (Int) -> Unit) {
+        val tmp = File(cacheDir, "x_${tweetId}_$index.mp4")
+        try {
+            val conn = openDownload(m.url)
+            try {
+                tmp.outputStream().use { o -> conn.inputStream.use { it.copyTo(o) } }
+            } finally {
+                conn.disconnect()
+            }
+            val uri = insertPending(
+                "x_${tweetId}_$index.gif", "image/gif", Environment.DIRECTORY_PICTURES, true
+            )
+            try {
+                contentResolver.openOutputStream(uri)!!.use { out ->
+                    GifConverter.convert(tmp.path, out, onProgress)
+                }
+                markDone(uri)
+            } catch (e: Throwable) {
+                contentResolver.delete(uri, null, null)
+                throw e
+            }
+        } finally {
+            tmp.delete()
         }
     }
 }
