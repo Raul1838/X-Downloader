@@ -22,7 +22,6 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONObject
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -164,6 +163,7 @@ class MainActivity : Activity() {
             try {
                 val items = fetchMedia(id)
                 if (items.isEmpty()) throw Exception("Este tweet no tiene imágenes, vídeos ni GIFs.")
+                val converted = asGif && items.any { it.kind != "photo" }
                 items.forEachIndexed { i, m ->
                     val label = "${i + 1} de ${items.size}"
                     if (asGif && m.kind != "photo") {
@@ -176,8 +176,9 @@ class MainActivity : Activity() {
                         save(m, id, i + 1)
                     }
                 }
+                val extra = if (converted) " El MP4 original también queda guardado en Películas/XDescargas." else ""
                 runOnUiThread {
-                    setBusy(false, "✅ ${items.size} archivo(s) guardado(s) en la galería (carpeta XDescargas).")
+                    setBusy(false, "✅ ${items.size} archivo(s) guardado(s) en la galería (carpeta XDescargas).$extra")
                 }
             } catch (e: Throwable) {
                 val msg = if (e is OutOfMemoryError) "Sin memoria suficiente para convertir este vídeo." else e.message
@@ -280,8 +281,8 @@ class MainActivity : Activity() {
         contentResolver.update(uri, values, null, null)
     }
 
-    // Imágenes y vídeos/GIFs tal cual (MP4)
-    private fun save(m: Media, tweetId: String, index: Int) {
+    // Imágenes y vídeos/GIFs tal cual (MP4). Devuelve el Uri del archivo guardado.
+    private fun save(m: Media, tweetId: String, index: Int): Uri {
         val isImage = m.kind == "photo"
         val url = if (isImage && !m.url.contains("?")) m.url + "?name=orig" else m.url
 
@@ -301,51 +302,38 @@ class MainActivity : Activity() {
         try {
             val uri = insertPending("x_${tweetId}_$index.$ext", mime, folder, isImage)
             try {
-                contentResolver.openOutputStream(uri)!!.use { out ->
+                val copied = contentResolver.openOutputStream(uri)!!.use { out ->
                     conn.inputStream.use { it.copyTo(out) }
+                }
+                val expected = conn.contentLengthLong
+                if (expected > 0 && copied != expected) {
+                    throw Exception("Descarga incompleta ($copied de $expected bytes).")
                 }
                 markDone(uri)
             } catch (e: Exception) {
                 contentResolver.delete(uri, null, null)
                 throw e
             }
+            return uri
         } finally {
             conn.disconnect()
         }
     }
 
-    // Vídeos y GIFs convertidos a GIF animado
+    // Paso 1: el MP4 se guarda en la galería. Paso 2: se convierte a GIF y se guarda también.
     private fun saveAsGif(m: Media, tweetId: String, index: Int, onProgress: (Int) -> Unit) {
-        val tmp = File(cacheDir, "x_${tweetId}_$index.mp4")
+        val videoUri = save(m, tweetId, index)
+        val gifUri = insertPending(
+            "x_${tweetId}_$index.gif", "image/gif", Environment.DIRECTORY_PICTURES, true
+        )
         try {
-            var tries = 0
-            while (true) {
-                var expected = -1L
-                val conn = openDownload(m.url)
-                try {
-                    tmp.outputStream().use { o -> conn.inputStream.use { it.copyTo(o) } }
-                    expected = conn.contentLengthLong
-                } finally {
-                    conn.disconnect()
-                }
-                if (expected <= 0 || tmp.length() == expected) break
-                tries++
-                if (tries >= 2) throw Exception("Descarga incompleta (${tmp.length()} de $expected bytes).")
+            contentResolver.openOutputStream(gifUri)!!.use { out ->
+                GifConverter.convert(this, videoUri, out, onProgress)
             }
-            val uri = insertPending(
-                "x_${tweetId}_$index.gif", "image/gif", Environment.DIRECTORY_PICTURES, true
-            )
-            try {
-                contentResolver.openOutputStream(uri)!!.use { out ->
-                    GifConverter.convert(tmp.path, out, onProgress)
-                }
-                markDone(uri)
-            } catch (e: Throwable) {
-                contentResolver.delete(uri, null, null)
-                throw e
-            }
-        } finally {
-            tmp.delete()
+            markDone(gifUri)
+        } catch (e: Throwable) {
+            contentResolver.delete(gifUri, null, null)
+            throw e
         }
     }
 }
