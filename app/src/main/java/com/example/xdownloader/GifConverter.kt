@@ -5,6 +5,7 @@ import android.media.MediaMetadataRetriever
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.RandomAccessFile
 import java.io.OutputStream
 import java.util.Arrays
 
@@ -22,17 +23,10 @@ object GifConverter {
     private const val PIXELS_PER_FRAME = 6000  // píxeles muestreados por fotograma
 
     fun convert(path: String, out: OutputStream, onProgress: (Int) -> Unit) {
-        val mmr = MediaMetadataRetriever()
-        var fis: FileInputStream? = null
+        val source = openSource(path)
+            ?: throw Exception("No se pudo leer el vídeo. Datos: ${describeFile(path)}")
+        val mmr = source.mmr
         try {
-            try {
-                mmr.setDataSource(path)
-            } catch (e: Exception) {
-                // Alternativa: abrir el archivo mediante su descriptor
-                fis = FileInputStream(path)
-                mmr.setDataSource(fis.fd)
-            }
-
             val fileSize = File(path).length()
             val durMs = meta(mmr, MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             var vw = meta(mmr, MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
@@ -51,8 +45,7 @@ object GifConverter {
                 }
             }
             if (vw <= 0 || vh <= 0) {
-                val mime = meta(mmr, MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
-                throw Exception("No se pudo leer el vídeo (archivo de $fileSize bytes, tipo: $mime).")
+                throw Exception("No se pudo leer el vídeo. Datos: ${describeFile(path)}")
             }
 
             val scale = minOf(1.0, MAX_WIDTH.toDouble() / vw)
@@ -105,8 +98,80 @@ object GifConverter {
             if (!haveFrame) throw Exception("No se pudieron leer fotogramas del vídeo.")
             enc.finish()
         } finally {
+            source.close()
+        }
+    }
+
+    private class Source(val mmr: MediaMetadataRetriever, val stream: FileInputStream?) {
+        fun close() {
+            try { mmr.release() } catch (e: Exception) { }
+            try { stream?.close() } catch (e: Exception) { }
+        }
+    }
+
+    private fun usable(mmr: MediaMetadataRetriever): Boolean =
+        meta(mmr, MediaMetadataRetriever.METADATA_KEY_MIMETYPE) != null ||
+            meta(mmr, MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) != null
+
+    // Prueba tres formas distintas de abrir el archivo y se queda con la primera que funcione
+    private fun openSource(path: String): Source? {
+        val len = File(path).length()
+        for (attempt in 0..2) {
+            val mmr = MediaMetadataRetriever()
+            var fis: FileInputStream? = null
+            try {
+                when (attempt) {
+                    0 -> mmr.setDataSource(path)
+                    1 -> {
+                        fis = FileInputStream(path)
+                        mmr.setDataSource(fis.fd, 0, len)
+                    }
+                    else -> {
+                        fis = FileInputStream(path)
+                        mmr.setDataSource(fis.fd)
+                    }
+                }
+                if (usable(mmr)) return Source(mmr, fis)
+            } catch (e: Exception) {
+                // se prueba la siguiente forma
+            }
             try { mmr.release() } catch (e: Exception) { }
             try { fis?.close() } catch (e: Exception) { }
+        }
+        return null
+    }
+
+    // Diagnóstico: tamaño, primeros bytes y estructura de cajas del MP4
+    private fun describeFile(path: String): String {
+        return try {
+            val f = File(path)
+            val len = f.length()
+            val head = ByteArray(minOf(16L, len).toInt())
+            FileInputStream(f).use { it.read(head) }
+            val ascii = head.joinToString("") {
+                val c = it.toInt() and 255
+                if (c in 32..126) c.toChar().toString() else "."
+            }
+            val boxes = StringBuilder()
+            var pos = 0L
+            RandomAccessFile(f, "r").use { raf ->
+                var count = 0
+                while (pos + 8 <= len && count < 8) {
+                    raf.seek(pos)
+                    val size32 = raf.readInt().toLong() and 0xFFFFFFFFL
+                    val type = ByteArray(4)
+                    raf.readFully(type)
+                    var size = size32
+                    if (size32 == 1L) size = raf.readLong() else if (size32 == 0L) size = len - pos
+                    boxes.append(String(type, Charsets.ISO_8859_1)).append('(').append(size).append(") ")
+                    if (size < 8) break
+                    pos += size
+                    count++
+                }
+            }
+            "tamaño=$len, inicio=\"$ascii\", cajas: ${boxes}fin=$pos"
+        } catch (e: Exception) {
+            "no se pudo analizar el archivo (${e.message})"
         }
     }
 

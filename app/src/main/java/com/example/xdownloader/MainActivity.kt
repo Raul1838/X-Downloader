@@ -318,11 +318,19 @@ class MainActivity : Activity() {
     private fun saveAsGif(m: Media, tweetId: String, index: Int, onProgress: (Int) -> Unit) {
         val tmp = File(cacheDir, "x_${tweetId}_$index.mp4")
         try {
-            val conn = openDownload(m.url)
-            try {
-                tmp.outputStream().use { o -> conn.inputStream.use { it.copyTo(o) } }
-            } finally {
-                conn.disconnect()
+            var tries = 0
+            while (true) {
+                var expected = -1L
+                val conn = openDownload(m.url)
+                try {
+                    tmp.outputStream().use { o -> conn.inputStream.use { it.copyTo(o) } }
+                    expected = conn.contentLengthLong
+                } finally {
+                    conn.disconnect()
+                }
+                if (expected <= 0 || tmp.length() == expected) break
+                tries++
+                if (tries >= 2) throw Exception("Descarga incompleta (${tmp.length()} de $expected bytes).")
             }
             val uri = insertPending(
                 "x_${tweetId}_$index.gif", "image/gif", Environment.DIRECTORY_PICTURES, true
